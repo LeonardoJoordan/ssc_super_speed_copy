@@ -38,7 +38,9 @@ def _copiar_arquivos(caminho_origem, caminho_destino, buffer_mb, callback_progre
     print("Iniciando motor de cópia C++...")
     if callback_log: callback_log("Iniciando motor turbo_copy.exe...")
     
-    caminho_executavel = os.path.join(os.getcwd(), "turbo_copy.exe")
+    # Detecta onde o script está rodando (seja .py ou .exe descompactado)
+    base_path = os.path.dirname(os.path.abspath(__file__))
+    caminho_executavel = os.path.join(base_path, "turbo_copy.exe")
     
     if not os.path.exists(caminho_executavel):
         msg = f"ERRO: Executável '{caminho_executavel}' não encontrado."
