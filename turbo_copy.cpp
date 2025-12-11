@@ -4,104 +4,96 @@
 #include <vector>
 #include <chrono>
 #include <iomanip>
+#include <thread>
+#include <string>
 
-// Namespace para encurtar os comandos de sistema de arquivos
 namespace fs = std::filesystem;
 
-// Configuração: Buffer de 16MB (A Estratégia do "Caminhão Grande")
-const size_t BUFFER_SIZE = 16 * 1024 * 1024;
-
-// Função para formatar bytes em MB
-double to_mb(uintmax_t bytes) {
-    return static_cast<double>(bytes) / (1024.0 * 1024.0);
-}
+// Variável global para o buffer (será definida no main)
+size_t TAMANHO_BUFFER = 16 * 1024 * 1024; // Padrão 16MB
 
 void copiar_arquivo_turbo(const fs::path& origem, const fs::path& destino, std::vector<char>& buffer) {
-    // Abre arquivos em modo binário bruto
     std::ifstream input(origem, std::ios::binary);
     std::ofstream output(destino, std::ios::binary);
 
-    if (!input || !output) {
-        std::cerr << "[ERRO] Falha ao abrir: " << origem << "\n";
-        return;
-    }
+    if (!input || !output) return;
 
-    // Loop de Cópia Manual com Buffer Gigante
     while (input) {
-        input.read(buffer.data(), BUFFER_SIZE);
-        std::streamsize bytes_lidos = input.gcount();
-        if (bytes_lidos > 0) {
-            output.write(buffer.data(), bytes_lidos);
+        input.read(buffer.data(), TAMANHO_BUFFER);
+        if (input.gcount() > 0) {
+            output.write(buffer.data(), input.gcount());
         }
     }
     
-    // Copia metadados (Data de modificação, etc) - Importante para fotos!
     try {
         fs::last_write_time(destino, fs::last_write_time(origem));
-    } catch (...) {
-        // Ignora erro de data se acontecer, foco é a cópia
-    }
+    } catch (...) {}
 }
 
 int main(int argc, char* argv[]) {
-    // O programa espera receber: turbo_copy.exe "ORIGEM" "DESTINO"
+    // Agora aceitamos um 3º argumento opcional (buffer)
     if (argc < 3) {
-        std::cout << "Uso: turbo_copy.exe <pasta_origem> <pasta_destino>\n";
+        std::cout << "Uso: turbo_copy.exe <origem> <destino> [buffer_mb]\n";
         return 1;
     }
 
     fs::path pasta_origem = argv[1];
     fs::path pasta_destino = argv[2];
 
-    if (!fs::exists(pasta_origem) || !fs::exists(pasta_destino)) {
-        std::cerr << "[ERRO] Pastas invalidas.\n";
-        return 1;
-    }
-
-    std::cout << "=== TURBO COPY V1 (C++ ENGINE) ===\n";
-    std::cout << "Origem: " << pasta_origem << "\n";
-    std::cout << "Destino: " << pasta_destino << "\n";
-    std::cout << "Buffer: 16 MB\n";
-
-    // Aloca memória RAM uma única vez para reutilizar
-    std::vector<char> buffer(BUFFER_SIZE);
-    
-    auto inicio = std::chrono::high_resolution_clock::now();
-    uintmax_t bytes_totais = 0;
-    int arquivos_copiados = 0;
-
-    // Varredura da pasta
-    for (const auto& entrada : fs::recursive_directory_iterator(pasta_origem)) {
-        if (entrada.is_regular_file()) {
-            fs::path caminho_origem = entrada.path();
-            // Calcula caminho de destino relativo
-            fs::path caminho_relativo = fs::relative(caminho_origem, pasta_origem);
-            fs::path caminho_final = pasta_destino / caminho_relativo.filename(); // Flat copy (tudo na raiz)
-
-            // Copia
-            copiar_arquivo_turbo(caminho_origem, caminho_final, buffer);
+    // Lógica para ler o Buffer do argumento
+    if (argc >= 4) {
+        try {
+            int mb = std::stoi(argv[3]);
+            // Proteção (Clamping)
+            if (mb < 1) mb = 1;
+            if (mb > 1024) mb = 1024;
             
-            bytes_totais += entrada.file_size();
-            arquivos_copiados++;
-            
-            // Log simples a cada 100 arquivos para não travar o terminal
-            if (arquivos_copiados % 100 == 0) {
-                 std::cout << "\rCopiados: " << arquivos_copiados << " arquivos..." << std::flush;
-            }
+            TAMANHO_BUFFER = static_cast<size_t>(mb) * 1024 * 1024;
+        } catch (...) {
+            // Se der erro na conversão, mantém 16MB
+            TAMANHO_BUFFER = 16 * 1024 * 1024;
         }
     }
 
-    auto fim = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> duracao = fim - inicio;
+    // Feedback visual do buffer escolhido
+    std::cout << "CONFIG_BUFFER: " << (TAMANHO_BUFFER / (1024*1024)) << " MB\n";
 
-    double mb_total = to_mb(bytes_totais);
-    double velocidade = mb_total / duracao.count();
+    if (!fs::exists(pasta_origem) || !fs::exists(pasta_destino)) return 1;
 
-    std::cout << "\n\n=== RELATORIO DE MISSAO ===\n";
-    std::cout << "Arquivos: " << arquivos_copiados << "\n";
-    std::cout << "Volume: " << std::fixed << std::setprecision(1) << mb_total << " MB\n";
-    std::cout << "Tempo: " << duracao.count() << "s\n";
-    std::cout << "VELOCIDADE: " << velocidade << " MB/s\n";
+    // --- FASE 1: PRÉ-SCAN ---
+    uintmax_t total_arquivos = 0;
+    uintmax_t total_bytes = 0;
+
+    for (const auto& entrada : fs::recursive_directory_iterator(pasta_origem)) {
+        if (entrada.is_regular_file()) {
+            total_arquivos++;
+            total_bytes += entrada.file_size();
+        }
+    }
+    
+    std::cout << "TOTAL_INFO: " << total_arquivos << " " << total_bytes << "\n" << std::flush;
+
+    // --- FASE 2: EXECUÇÃO ---
+    std::vector<char> buffer(TAMANHO_BUFFER);
+    int copiados = 0;
+    uintmax_t bytes_copiados = 0;
+
+    for (const auto& entrada : fs::recursive_directory_iterator(pasta_origem)) {
+        if (entrada.is_regular_file()) {
+            fs::path origem = entrada.path();
+            uintmax_t tamanho_atual = entrada.file_size();
+
+            fs::path relativo = fs::relative(origem, pasta_origem);
+            fs::path destino = pasta_destino / relativo.filename();
+
+            copiar_arquivo_turbo(origem, destino, buffer);
+            
+            copiados++;
+            bytes_copiados += tamanho_atual;
+
+            std::cout << "PROGRESSO: " << copiados << " " << bytes_copiados << "\n" << std::flush;
+        }
+    }
 
     return 0;
 }

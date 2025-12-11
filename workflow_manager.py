@@ -30,93 +30,109 @@ def _limpar_diretorio(caminho_pasta, callback_log=None):
         if callback_log: callback_log(f"ERRO: Não foi possível limpar o diretório '{caminho_pasta}'.")
         print(f"Motivo: {e}")
         return False
+        
+def _copiar_arquivos(caminho_origem, caminho_destino, buffer_mb, callback_progresso, callback_log=None):
+    """
+    Delega a cópia para o executável externo turbo_copy.exe e monitora o progresso em tempo real.
+    """
+    print("Iniciando motor de cópia C++...")
+    if callback_log: callback_log("Iniciando motor turbo_copy.exe...")
     
-def _copiar_um_arquivo(dados):
-    """
-    Versão revertida para shutil.copy2.
-    Motivo: A implementação interna em C do Python provou ser mais rápida 
-    que loops de leitura/escrita manuais para este cenário.
-    """
-    origem, destino = dados
-    try:
-        # copy2 é a ferramenta mais otimizada que temos.
-        # Ela preserva os metadados (importante para suas fotos) e roda em baixo nível.
-        shutil.copy2(origem, destino)
-        return True
-    except Exception as e:
-        print(f"Erro ao copiar {origem}: {e}")
+    caminho_executavel = os.path.join(os.getcwd(), "turbo_copy.exe")
+    
+    if not os.path.exists(caminho_executavel):
+        msg = f"ERRO: Executável '{caminho_executavel}' não encontrado."
+        print(msg)
+        if callback_log: callback_log(msg)
         return False
-    
-def _copiar_arquivos(caminho_origem, caminho_destino, callback_progresso, callback_log=None):
-    """
-    Copia arquivos em paralelo, calculando tamanho total e velocidade média.
-    """
-    print("Iniciando cópia paralela com monitoramento de volume...")
-    if callback_log: callback_log("Iniciando cópia paralela...")
-    
+
     try:
-        # Passo 1: Listar e Calcular Tamanho Total
-        if callback_log: callback_log("Calculando volume total dos arquivos...")
-        
-        lista_tarefas = []
-        bytes_totais_fluxo = 0
-        
-        for pasta_raiz, _, nomes_arquivos in os.walk(caminho_origem):
-            for nome_arquivo in nomes_arquivos:
-                caminho_completo_origem = os.path.join(pasta_raiz, nome_arquivo)
-                caminho_completo_destino = os.path.join(caminho_destino, nome_arquivo)
-                
-                # Obtém o tamanho do arquivo para as estatísticas
-                tamanho_arquivo = os.path.getsize(caminho_completo_origem)
-                bytes_totais_fluxo += tamanho_arquivo
-                
-                # Guarda origem, destino e tamanho na tarefa
-                lista_tarefas.append((caminho_completo_origem, caminho_completo_destino, tamanho_arquivo))
-        
-        total_arquivos = len(lista_tarefas)
-        mb_total = bytes_totais_fluxo / (1024 * 1024)
-        print(f"Total: {total_arquivos} arquivos | {mb_total:.1f} MB")
-        if callback_log: callback_log(f"Volume total encontrado: {mb_total:.1f} MB")
-
-        # Passo 2: Execução Paralela
-        arquivos_copiados = 0
-        bytes_copiados = 0
+        # Marca o início real da cópia
         inicio_copia = time.time()
-        
-        # max_workers=8 para saturar o UHS-II sem travar o controlador
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            # Mapeia futures para (caminho_origem, tamanho)
-            futures = {
-                executor.submit(_copiar_um_arquivo, (t[0], t[1])): (t[0], t[2]) 
-                for t in lista_tarefas
-            }
-            
-            for future in concurrent.futures.as_completed(futures):
-                origem, tamanho = futures[future]
-                
-                # Se a cópia foi sucesso (o future retorna True/False da função _copiar_um_arquivo)
-                if future.result():
-                    arquivos_copiados += 1
-                    bytes_copiados += tamanho
-                    
-                    nome_arquivo = os.path.basename(origem)
-                    if callback_progresso:
-                        # Passamos agora os bytes atuais e totais
-                        callback_progresso(arquivos_copiados, total_arquivos, nome_arquivo, bytes_copiados, bytes_totais_fluxo)
 
-        # Passo 3: Relatório Final de Velocidade
-        tempo_total = time.time() - inicio_copia
-        velocidade_media = (bytes_copiados / (1024 * 1024)) / tempo_total if tempo_total > 0 else 0
+        processo = subprocess.Popen(
+            [caminho_executavel, caminho_origem, caminho_destino, str(buffer_mb)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1 
+        )
         
-        msg_final = f"✓ Cópia concluída! Média: {velocidade_media:.1f} MB/s em {tempo_total:.1f}s"
-        print(msg_final)
-        if callback_log: callback_log(msg_final)
+        # Variáveis de estado
+        arquivos_copiados = 0
+        total_arquivos = 0
+        bytes_totais = 0
+        bytes_atuais = 0
         
-        return True
+        while True:
+            linha = processo.stdout.readline()
+            if not linha and processo.poll() is not None:
+                break 
+            
+            if linha:
+                linha = linha.strip()
+                
+                if linha.startswith("TOTAL_INFO:"):
+                    try:
+                        partes = linha.split()
+                        total_arquivos = int(partes[1])
+                        bytes_totais = int(partes[2])
+                    except ValueError:
+                        pass
+
+                elif linha.startswith("PROGRESSO:"):
+                    try:
+                        partes = linha.split()
+                        arquivos_copiados = int(partes[1])
+                        bytes_atuais = int(partes[2])
+                        
+                        if callback_progresso:
+                            callback_progresso(
+                                arquivos_copiados, 
+                                total_arquivos, 
+                                "Copiando...", 
+                                bytes_atuais, 
+                                bytes_totais
+                            )
+                    except ValueError:
+                        pass
+        
+        codigo_retorno = processo.poll()
+        
+        if codigo_retorno == 0:
+            # --- CÁLCULO DO RESUMO FINAL ---
+            tempo_total = time.time() - inicio_copia
+            if tempo_total <= 0: tempo_total = 0.001 # Evita divisão por zero
+            
+            mb_total = bytes_totais / (1024 * 1024)
+            velocidade_media = mb_total / tempo_total
+            
+            relatorio = (
+                f"=== RELATÓRIO FINAL ===\n"
+                f"Total de Arquivos: {total_arquivos}\n"
+                f"Volume Total: {mb_total:.2f} MB\n"
+                f"Tempo Total: {tempo_total:.2f} segundos\n"
+                f"Velocidade Média: {velocidade_media:.2f} MB/s\n"
+                f"======================="
+            )
+            
+            print(relatorio)
+            if callback_log: callback_log(relatorio)
+            
+            # Garante que a barra mostre 100%
+            if callback_progresso:
+                callback_progresso(total_arquivos, total_arquivos, "Finalizado", bytes_totais, bytes_totais)
+            return True
+        else:
+            erro = processo.stderr.read()
+            msg_erro = f"ERRO no motor C++: {erro}"
+            print(msg_erro)
+            if callback_log: callback_log(msg_erro)
+            return False
 
     except Exception as e:
-        print(f"ERRO CRÍTICO: {e}")
-        if callback_log: callback_log(f"ERRO: {e}")
+        print(f"ERRO CRÍTICO ao chamar subprocesso: {e}")
+        if callback_log: callback_log(f"ERRO CRÍTICO: {e}")
         return False
 
 
@@ -156,7 +172,7 @@ def _abrir_lightroom(caminho_para_importar, callback_log=None):
         if callback_log: callback_log(f"ERRO: Falha ao tentar abrir o Lightroom.")
         return False
 
-def executar_fluxo_de_trabalho(caminho_origem, caminho_destino, callback_progresso=None, callback_log=None):
+def executar_fluxo_de_trabalho(caminho_origem, caminho_destino, buffer_mb=16, callback_progresso=None, callback_log=None):
     """
     Função principal que orquestra todo o fluxo de trabalho.
     Agora aceita um callback para reportar progresso.
@@ -170,7 +186,7 @@ def executar_fluxo_de_trabalho(caminho_origem, caminho_destino, callback_progres
     if not _limpar_diretorio(caminho_destino, callback_log):
         return False
 
-    if not _copiar_arquivos(caminho_origem, caminho_destino, callback_progresso, callback_log):
+    if not _copiar_arquivos(caminho_origem, caminho_destino, buffer_mb, callback_progresso, callback_log):
         return False
     
     if not _abrir_lightroom(caminho_destino, callback_log):

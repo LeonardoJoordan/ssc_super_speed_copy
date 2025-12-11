@@ -6,6 +6,7 @@ import json
 import workflow_manager
 import threading
 import time
+from tkinter import filedialog, messagebox, ttk, simpledialog
 from datetime import datetime, timedelta
 
 
@@ -18,26 +19,31 @@ ARQUIVO_CONFIG = os.path.join(PASTA_TEMP, "expo_facil_config.json")
 tempo_inicio_copia = None
 
 # --- Funções de Persistência (Salvar/Carregar JSON) ---
-def salvar_caminhos(origem, destino):
-    """Salva os caminhos de origem e destino em um arquivo JSON."""
-    config_data = {'origem': origem, 'destino': destino}
+def salvar_configuracoes(origem, destino, buffer_val):
+    """Salva origem, destino e buffer em um arquivo JSON."""
+    config_data = {
+        'origem': origem, 
+        'destino': destino,
+        'buffer': buffer_val
+    }
     try:
         with open(ARQUIVO_CONFIG, 'w') as f:
             json.dump(config_data, f)
     except IOError as e:
         print(f"Erro ao salvar configurações: {e}")
 
-def carregar_caminhos():
-    """Carrega os caminhos do arquivo JSON, se ele existir."""
+def carregar_configuracoes():
+    """Carrega as configurações. Retorna (origem, destino, buffer)."""
     if not os.path.exists(ARQUIVO_CONFIG):
-        return None, None # Retorna None se o arquivo ainda não existe
+        return None, None, 16 # Retorna padrão se não existir
     try:
         with open(ARQUIVO_CONFIG, 'r') as f:
             config_data = json.load(f)
-            return config_data.get('origem'), config_data.get('destino')
+            # O .get(chave, valor_padrao) evita erros se a chave não existir em json antigo
+            return config_data.get('origem'), config_data.get('destino'), config_data.get('buffer', 16)
     except (IOError, json.JSONDecodeError) as e:
         print(f"Erro ao carregar configurações: {e}")
-        return None, None
+        return None, None, 16
     
 def log_message(message):
     """Adiciona uma mensagem ao painel de log da interface."""
@@ -111,8 +117,24 @@ def selecionar_pasta(variavel_caminho, label_texto):
     caminho_selecionado = filedialog.askdirectory(title=f"Selecione a {label_texto}")
     if caminho_selecionado:
         variavel_caminho.set(caminho_selecionado)
-        salvar_caminhos(caminho_origem.get(), caminho_destino.get())
+        salvar_configuracoes(caminho_origem.get(), caminho_destino.get(), buffer_size_mb.get())
         verificar_estado_botao_iniciar()
+
+def configurar_buffer():
+    """Abre um popup para definir o tamanho do buffer."""
+    valor = simpledialog.askinteger(
+        "Configurar Buffer", 
+        "Tamanho do Buffer (MB):\n(Mín: 1, Máx: 1024)",
+        parent=janela,
+        minvalue=1, 
+        maxvalue=1024,
+        initialvalue=buffer_size_mb.get()
+    )
+    if valor:
+        buffer_size_mb.set(valor)
+        log_message(f"Buffer definido para: {valor} MB")
+
+        salvar_configuracoes(caminho_origem.get(), caminho_destino.get(), buffer_size_mb.get())
 
 # ADICIONE ESTA NOVA VERSÃO DA FUNÇÃO
 def iniciar_processo():
@@ -143,18 +165,19 @@ def iniciar_processo():
         # Reseta nosso cronômetro global para esta execução
         global tempo_inicio_copia
         tempo_inicio_copia = None
+                
         try:
             print("Chamando o workflow_manager a partir da thread...")
             label_progresso_texto.set("Iniciando...")
             barra_progresso['value'] = 0
             janela.update_idletasks()
+            tamanho_buffer = buffer_size_mb.get()
 
             sucesso = workflow_manager.executar_fluxo_de_trabalho(
-                origem, destino, atualizar_progresso, log_message
+                origem, destino, tamanho_buffer, atualizar_progresso, log_message
             )
 
             if sucesso:
-                label_progresso_texto.set("Cópia Concluída!")
                 messagebox.showinfo("Concluído", "O fluxo de trabalho foi executado com sucesso.")
             else:
                 label_progresso_texto.set("Ocorreu um erro!")
@@ -175,12 +198,28 @@ def iniciar_processo():
 # --- Construção da Interface Gráfica ---
 janela = tk.Tk()
 janela.title("Expo Fácil")
-janela.geometry("500x500")
+
+# --- BLOCO DE CENTRALIZAÇÃO ---
+largura_janela = 500
+altura_janela = 500
+
+# Obtém as dimensões da tela do monitor
+largura_tela = janela.winfo_screenwidth()
+altura_tela = janela.winfo_screenheight()
+
+# Calcula a posição x e y para ficar exatamente no meio
+pos_x = (largura_tela // 2) - (largura_janela // 2)
+pos_y = (altura_tela // 2) - (altura_janela // 2)
+
+# Define a geometria dinâmica: LarguraxAltura+X+Y
+janela.geometry(f"{largura_janela}x{altura_janela}+{pos_x}+{pos_y}")
 janela.minsize(500, 500)
+# ------------------------------
 
 # Variáveis para armazenar os caminhos selecionados
 caminho_origem = tk.StringVar()
 caminho_destino = tk.StringVar()
+buffer_size_mb = tk.IntVar(value=16)
 
 # Layout usando um Frame principal
 frame = tk.Frame(janela, padx=10, pady=10)
@@ -206,6 +245,21 @@ label_destino.pack(side="left", fill="x", expand=True)
 botao_destino = tk.Button(frame_destino, text="Selecionar...", command=lambda: selecionar_pasta(caminho_destino, "Pasta de Destino"))
 botao_destino.pack(side="right")
 
+# --- Configurações Extras ---
+frame_config = tk.Frame(frame)
+frame_config.pack(fill="x", pady=5)
+
+btn_buffer = tk.Button(frame_config, text="⚙ Configurar Buffer", command=configurar_buffer)
+btn_buffer.pack(side="right")
+
+lbl_buffer_info = tk.Label(frame_config, text="Buffer Atual: 16 MB", fg="gray")
+lbl_buffer_info.pack(side="right", padx=10)
+
+# Trace para atualizar o label quando a variável mudar
+def atualizar_label_buffer(*args):
+    lbl_buffer_info.config(text=f"Buffer Atual: {buffer_size_mb.get()} MB")
+buffer_size_mb.trace_add("write", atualizar_label_buffer)
+
 # --- Botão Iniciar ---
 botao_iniciar = tk.Button(
     frame,
@@ -220,8 +274,15 @@ botao_iniciar.pack(pady=20, fill="x", expand=True)
 frame_progresso = tk.Frame(frame, pady=10)
 frame_progresso.pack(fill="x", expand=True)
 
-label_progresso_texto = tk.StringVar(value="Aguardando início...")
-label_status = tk.Label(frame_progresso, textvariable=label_progresso_texto, anchor="w")
+texto_inicial = (
+    "Arquivos: 0 de 0\n"
+    "Tempo Restante: --:--:--\n"
+    "Dados: 0 MB copiados | 0 MB restam\n"
+    "Velocidade: 0.0 MB/s"
+)
+label_progresso_texto = tk.StringVar(value=texto_inicial)
+# ------------------------------
+label_status = tk.Label(frame_progresso, textvariable=label_progresso_texto, justify="center")
 label_status.pack(fill="x")
 
 barra_progresso = ttk.Progressbar(frame_progresso, orient="horizontal", length=100, mode="determinate")
@@ -235,12 +296,17 @@ log_text = tk.Text(frame_log, height=6, state="disabled", bg="#f0f0f0", wrap=tk.
 log_text.pack(fill="both", expand=True)
 
 # --- Lógica de Inicialização ---
-# Carrega os últimos caminhos salvos ao iniciar o programa
-origem_salva, destino_salvo = carregar_caminhos()
+# Carrega as últimas configurações salvas ao iniciar o programa
+origem_salva, destino_salvo, buffer_salvo = carregar_configuracoes()
+
 if origem_salva:
     caminho_origem.set(origem_salva)
 if destino_salvo:
     caminho_destino.set(destino_salvo)
+if buffer_salvo:
+    buffer_size_mb.set(buffer_salvo)
+    # Atualiza o label visualmente (força o trace a rodar ou atualiza manual)
+    lbl_buffer_info.config(text=f"Buffer Atual: {buffer_salvo} MB")
 
 # Verifica o estado do botão com base nos caminhos carregados
 verificar_estado_botao_iniciar()
