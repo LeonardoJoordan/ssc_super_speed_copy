@@ -20,3 +20,7 @@ venv/
 
 # Logs
 *.log
+
+main.build
+main.dist
+main.onefile-build
