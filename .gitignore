@@ -1,0 +1,22 @@
+# Pastas de build / distribuição
+build/
+dist/
+*.spec
+
+# Cache do Python
+__pycache__/
+*.py[cod]
+*.pyd
+.mypy_cache/
+.pytest_cache/
+
+# Ambientes virtuais
+.env
+.venv
+venv/
+
+# Coisas do VS Code
+.vscode/
+
+# Logs
+*.log
